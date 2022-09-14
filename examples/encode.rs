@@ -5,7 +5,7 @@ use std::time::Instant;
 fn main() {
     let input = ["tile", "bevy", "bevy_small", "hartenstein"];
     // let input = ["tile", "bevy_small"];
-    // let input = ["bevy_small", "hartenstein"];
+    // let input = ["hartenstein"];
     // let input = ["bevy_small"];
     // let input = ["bevy"];
 
