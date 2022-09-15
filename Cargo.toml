@@ -1,0 +1,18 @@
+[package]
+name = "dtm"
+description = "Fast encoder/decoder for the lossless DTM 16 bit image format"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+edition = "2021"
+categories = ["multimedia::images", "multimedia::encoding"]
+keywords = ["dtm", "graphics", "image", "encoding"]
+exclude = ["images/*"]
+readme = "README.md"
+authors = ["Kurt Kühnert <kurt@kuehnert.dev"]
+repository = "https://github.com/ku95/dtm"
+
+[dependencies]
+bytemuck = "1.12"
+
+[dev-dependencies]
+image = "0.24"
