@@ -116,9 +116,9 @@ impl DTM {
             if channel_size < descriptor.channel_size() {
                 decode(&mut bytes, &mut pixels)?;
             } else if channel_size == descriptor.channel_size() {
-                cast_slice(&bytes.data[..channel_size])
-                    .iter()
-                    .for_each(|&pixel| pixels.set(pixel));
+                &bytes.data[..channel_size]
+                    .chunks_exact(2)
+                    .for_each(|bytes| pixels.set(bytes[0] as u16 + ((bytes[1] as u16) << 8)));
             } else {
                 return Err(DecodeError::InvalidChannels);
             }
