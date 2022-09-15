@@ -116,7 +116,7 @@ impl DTM {
             if channel_size < descriptor.channel_size() {
                 decode(&mut bytes, &mut pixels)?;
             } else if channel_size == descriptor.channel_size() {
-                cast_slice(bytes.data)
+                cast_slice(&bytes.data[..channel_size])
                     .iter()
                     .for_each(|&pixel| pixels.set(pixel));
             } else {
