@@ -46,10 +46,10 @@ impl Display for EncodeError {
 }
 
 impl DTM {
-    /// Encodes a DTM image from a pixel slice into file.
+    /// Encodes a DTM image from a pixel slice into a file.
     #[inline]
-    pub fn encode_file<P: AsRef<Path>>(&self, path: P, pixels: &[u16]) -> Result<(), EncodeError> {
-        let encoded = self.encode_alloc(pixels)?;
+    pub fn encode_file<P: AsRef<Path>>(&self, path: P, decoded: &[u8]) -> Result<(), EncodeError> {
+        let encoded = self.encode_alloc(decoded)?;
 
         match fs::write(path, encoded) {
             Ok(_) => Ok(()),
@@ -59,40 +59,44 @@ impl DTM {
 
     /// Encodes a DTM image from a pixel slice into a newly allocated `Vec`.
     #[inline]
-    pub fn encode_alloc(&self, pixels: &[u16]) -> Result<Vec<u8>, EncodeError> {
-        let mut pixels = match pixels.get(..self.image_pixel_count()) {
-            Some(pixels) => Pixels::new(self.width, self.height, self.channel_count, pixels),
+    pub fn encode_alloc(&self, decoded: &[u8]) -> Result<Vec<u8>, EncodeError> {
+        let mut decoded = match decoded.get(..self.image_size()) {
+            Some(decoded) => Decoded::new(
+                self.width as usize,
+                self.height as usize,
+                self.channel_count as usize,
+                decoded,
+            ),
             None => return Err(EncodeError::InsufficientInputData),
         };
 
-        let mut data = vec![0; DTM_HEADER_SIZE + 3 * self.image_pixel_count()];
-        let mut bytes = Bytes::new(&mut data[DTM_HEADER_SIZE..]);
+        let mut data = vec![0; DTM_HEADER_SIZE + 3 * self.image_size() / 2];
+        let mut encoded = Encoded::new(&mut data[DTM_HEADER_SIZE..]);
 
         let mut channel_sizes = [0; 4];
         let mut total_size = DTM_HEADER_SIZE;
 
-        for channel_size in &mut channel_sizes[0..self.channel_count] {
-            encode(&mut bytes, &mut pixels);
+        for channel_size in &mut channel_sizes[0..self.channel_count as usize] {
+            encode(&mut encoded, &mut decoded);
 
-            if bytes.index >= self.channel_size() {
-                bytes.index = 0;
-                pixels
+            if encoded.index >= self.channel_size() {
+                encoded.index = 0;
+                decoded
                     .data
-                    .iter()
-                    .skip(pixels.channel)
-                    .step_by(pixels.channel_count)
-                    .for_each(|&pixel| {
-                        bytes.data[bytes.index] = pixel as u8;
-                        bytes.data[bytes.index + 1] = (pixel >> 8) as u8;
-                        bytes.index += 2;
+                    .chunks(2)
+                    .skip(decoded.channel)
+                    .step_by(decoded.channel_count)
+                    .for_each(|pixel| {
+                        encoded.data[encoded.index..encoded.index + 2].copy_from_slice(pixel);
+                        encoded.index += 2;
                     });
             };
 
-            *channel_size = bytes.index;
+            *channel_size = encoded.index;
             total_size += *channel_size;
 
-            bytes = Bytes::new(&mut bytes.data[*channel_size..]);
-            pixels.next_channel();
+            encoded = Encoded::new(&mut encoded.data[*channel_size..]);
+            decoded.next_channel();
         }
 
         data[0..3].copy_from_slice(DTM_MAGIC);
@@ -110,62 +114,62 @@ impl DTM {
     }
 }
 
-fn encode(bytes: &mut Bytes, pixels: &mut Pixels) {
-    while !pixels.is_empty() {
-        let previous_pixel = pixels.previous();
-        let pixel = pixels.current();
+fn encode(encoded: &mut Encoded, decoded: &mut Decoded) {
+    while !decoded.is_empty() {
+        let previous_pixel = decoded.previous();
+        let pixel = decoded.current();
 
         if pixel == previous_pixel {
-            bytes.run_length += 1;
+            encoded.run_length += 1;
 
-            if bytes.run_length == 63 {
-                finish_run(bytes, pixels);
+            if encoded.run_length == 63 {
+                finish_run(encoded, decoded);
             }
         } else {
-            if bytes.run_length > 0 {
-                finish_run(bytes, pixels);
+            if encoded.run_length > 0 {
+                finish_run(encoded, decoded);
             }
 
-            let diff = pixel as i32 - pixels.paeth() as i32;
+            let diff = pixel as i32 - decoded.paeth() as i32;
 
             if (-DOUBLE_DIFF_RANGE..DOUBLE_DIFF_RANGE).contains(&diff) {
-                if let Some(previous_diff) = bytes.outstanding_diff {
-                    bytes.double_diff(previous_diff, diff);
-                    bytes.outstanding_diff = None;
+                if let Some(previous_diff) = encoded.outstanding_diff {
+                    encoded.double_diff(previous_diff, diff);
+                    encoded.outstanding_diff = None;
                 } else {
-                    bytes.outstanding_diff = Some(diff);
+                    encoded.outstanding_diff = Some(diff);
                 }
             } else {
-                if let Some(previous_diff) = bytes.outstanding_diff {
-                    bytes.single_diff(previous_diff);
-                    bytes.outstanding_diff = None;
+                if let Some(previous_diff) = encoded.outstanding_diff {
+                    encoded.single_diff(previous_diff);
+                    encoded.outstanding_diff = None;
                 }
 
                 if (-SINGLE_DIFF_RANGE..SINGLE_DIFF_RANGE).contains(&diff) {
-                    bytes.single_diff(diff);
-                } else if pixel == bytes.pixel_cache[(pixel % 64) as usize] {
-                    bytes.cache(pixel);
+                    encoded.single_diff(diff);
+                } else if pixel == encoded.pixel_cache[(pixel % 64) as usize] {
+                    encoded.cache(pixel);
                 } else {
-                    bytes.default(pixel);
+                    encoded.default(pixel);
                 }
             }
         }
 
-        bytes.pixel_cache[(pixel % 64) as usize] = pixel;
-        pixels.index += 1;
+        encoded.pixel_cache[(pixel % 64) as usize] = pixel;
+        decoded.index += 1;
     }
 
-    if bytes.run_length > 0 {
-        finish_run(bytes, pixels);
+    if encoded.run_length > 0 {
+        finish_run(encoded, decoded);
     }
 
-    if let Some(previous_diff) = bytes.outstanding_diff {
-        bytes.single_diff(previous_diff);
+    if let Some(previous_diff) = encoded.outstanding_diff {
+        encoded.single_diff(previous_diff);
     }
 
     /*
     unsafe {
-        let size = pixels.width * pixels.height;
+        let size = decoded.width * decoded.height;
         println!(
             "Cache: {} ({}%)",
             C_CACHE,
@@ -194,8 +198,8 @@ fn encode(bytes: &mut Bytes, pixels: &mut Pixels) {
         );
         println!(
             "Total: {} ({}%)",
-            bytes.index,
-            bytes.index as f32 / (2 * size) as f32 * 100.0
+            encoded.index,
+            encoded.index as f32 / (2 * size) as f32 * 100.0
         );
         println!();
 
@@ -215,38 +219,38 @@ fn encode(bytes: &mut Bytes, pixels: &mut Pixels) {
 }
 
 #[inline]
-fn finish_run(bytes: &mut Bytes, pixels: &mut Pixels) {
+fn finish_run(encoded: &mut Encoded, decoded: &mut Decoded) {
     let mut run = true;
 
-    if let Some(previous_diff) = bytes.outstanding_diff {
-        if bytes.run_length == 1 {
-            pixels.index -= 1;
-            let diff = pixels.current() as i32 - pixels.paeth() as i32;
-            pixels.index += 1;
+    if let Some(previous_diff) = encoded.outstanding_diff {
+        if encoded.run_length == 1 {
+            decoded.index -= 1;
+            let diff = decoded.current() as i32 - decoded.paeth() as i32;
+            decoded.index += 1;
 
             if (-DOUBLE_DIFF_RANGE..DOUBLE_DIFF_RANGE).contains(&previous_diff)
                 && (-DOUBLE_DIFF_RANGE..DOUBLE_DIFF_RANGE).contains(&diff)
             {
-                bytes.double_diff(previous_diff, diff);
+                encoded.double_diff(previous_diff, diff);
                 run = false;
             }
         }
 
         if run {
-            bytes.single_diff(previous_diff);
+            encoded.single_diff(previous_diff);
         }
 
-        bytes.outstanding_diff = None;
+        encoded.outstanding_diff = None;
     }
 
     if run {
-        bytes.run_length();
+        encoded.run_length();
     }
 
-    bytes.run_length = 0;
+    encoded.run_length = 0;
 }
 
-struct Bytes<'a> {
+struct Encoded<'a> {
     data: &'a mut [u8],
     pixel_cache: [u16; 64],
     outstanding_diff: Option<i32>,
@@ -254,7 +258,7 @@ struct Bytes<'a> {
     index: usize,
 }
 
-impl<'a> Bytes<'a> {
+impl<'a> Encoded<'a> {
     #[inline]
     fn new(data: &'a mut [u8]) -> Self {
         Self {
@@ -310,18 +314,18 @@ impl<'a> Bytes<'a> {
     }
 }
 
-struct Pixels<'a> {
+struct Decoded<'a> {
     width: usize,
     height: usize,
     channel_count: usize,
-    data: &'a [u16],
+    data: &'a [u8],
     channel: usize,
     index: usize,
 }
 
-impl<'a> Pixels<'a> {
+impl<'a> Decoded<'a> {
     #[inline]
-    pub fn new(width: usize, height: usize, channel_count: usize, data: &'a [u16]) -> Self {
+    pub fn new(width: usize, height: usize, channel_count: usize, data: &'a [u8]) -> Self {
         Self {
             width,
             height,
@@ -334,7 +338,8 @@ impl<'a> Pixels<'a> {
 
     #[inline]
     fn get(&self, index: usize) -> u16 {
-        self.data[index * self.channel_count + self.channel]
+        let index = (index * self.channel_count + self.channel) << 1;
+        u16::from_le_bytes(self.data[index..index + 2].try_into().unwrap())
     }
 
     #[inline]

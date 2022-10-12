@@ -6,10 +6,11 @@ fn main() {
     let descriptor1 = DTM {
         pixel_size: 2,
         channel_count: 2,
-        width: source.width() as usize,
-        height: source.height() as usize,
+        width: source.width(),
+        height: source.height(),
     };
-    let data1 = source.as_luma_alpha16().unwrap().to_vec();
+
+    let data1 = Vec::from(source.as_bytes());
 
     descriptor1
         .encode_file("images/output/minmax.dtm", &data1)

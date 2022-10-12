@@ -10,31 +10,31 @@ fn main() {
 
     for name in &input {
         let source = image::open(format!("images/input/{}.png", name)).unwrap();
-        let data = source.as_luma16().unwrap().to_vec();
+        let data = source.as_bytes();
 
         let path_bin = format!("images/output/{}.bin", name);
         let path_dtm = format!("images/output/{}.dtm", name);
         let path_png = format!("images/output/{}.png", name);
 
         let start = Instant::now();
-        fs::write(&path_bin, bytemuck::cast_slice(&data)).unwrap();
+        fs::write(&path_bin, data).unwrap();
         let encode_bin = start.elapsed().as_secs_f32() * 1000.0;
 
         let start = Instant::now();
-        let descriptor = DTM {
+        DTM {
             pixel_size: 2,
             channel_count: 1,
-            width: source.width() as usize,
-            height: source.height() as usize,
-        };
-
-        descriptor.encode_file(&path_dtm, &data).unwrap();
+            width: source.width(),
+            height: source.height(),
+        }
+        .encode_file(&path_dtm, data)
+        .unwrap();
         let encode_dtm = start.elapsed().as_secs_f32() * 1000.0;
 
         let start = Instant::now();
         image::save_buffer(
             &path_png,
-            bytemuck::cast_slice(&data),
+            data,
             source.width(),
             source.height(),
             image::ColorType::L16,

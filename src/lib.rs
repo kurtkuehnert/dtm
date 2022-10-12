@@ -13,23 +13,23 @@ pub const DTM_MAGIC: &[u8] = "dtm".as_bytes();
 /// This value is parsed from the image header during decoding or is specified for encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DTM {
-    pub pixel_size: usize,
-    pub channel_count: usize,
-    pub width: usize,
-    pub height: usize,
+    pub pixel_size: u32,
+    pub channel_count: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl DTM {
-    /// Returns the number of pixels of the decoded image.
+    /// Returns the size of the decoded image in bytes .
     #[inline]
-    pub fn image_pixel_count(&self) -> usize {
-        self.channel_count * self.width * self.height
+    pub fn image_size(&self) -> usize {
+        (self.pixel_size * self.channel_count * self.width * self.height) as usize
     }
 
-    /// Returns the size of a channel of the decoded image.
+    /// Returns the size of a channel of the decoded image in bytes .
     #[inline]
     pub fn channel_size(&self) -> usize {
-        self.pixel_size * self.width * self.height
+        (self.pixel_size * self.width * self.height) as usize
     }
 }
 

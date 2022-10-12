@@ -3,13 +3,18 @@ use crate::{
     DTM_HEADER_SIZE, DTM_MAGIC, MASK_3BIT, MASK_6BIT, RUN_LENGTH, RUN_LENGTH_END, SINGLE_DIFF,
     SINGLE_DIFF_END, SINGLE_DIFF_RANGE,
 };
-use bytemuck::checked::cast_slice;
 use std::{
     error::Error,
     fmt::{self, Display},
     fs,
     path::Path,
 };
+
+struct Header {
+    descriptor: DTM,
+    channel_sizes: [usize; 4],
+    total_size: usize,
+}
 
 /// Errors that may occur during DTM image decoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -18,7 +23,7 @@ pub enum DecodeError {
     InsufficientInputData,
     /// The encoded header contains an invalid magic value.
     ///
-    /// First four bytes must contain `b"dtm"`.
+    /// First four encoded must contain `b"dtm"`.
     /// This usually indicates that the buffer does not contain a DTM image.
     InvalidMagic,
     /// The encoded header contains an invalid channels value.
@@ -50,21 +55,10 @@ impl Display for DecodeError {
 }
 
 impl DTM {
-    /// Decodes a DTM image from a file into a newly allocated `Vec`.
-    #[inline]
-    pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<(Self, Vec<u16>), DecodeError> {
-        let encoded = match fs::read(path) {
-            Ok(data) => data,
-            Err(_) => return Err(DecodeError::IoError),
-        };
-
-        DTM::decode_alloc(&encoded)
-    }
-
-    /// Decodes a DTM image from a byte slice into a newly allocated `Vec`.
-    #[inline]
-    pub fn decode_alloc(bytes: &[u8]) -> Result<(Self, Vec<u16>), DecodeError> {
-        let header = if let Some(header) = bytes.get(..DTM_HEADER_SIZE) {
+    /// Reads header from encoded DTM image.
+    /// The returned header can be analyzed before proceeding parsing with [`DTM::decode_skip_header`].
+    fn decode_header(encoded: &[u8]) -> Result<Header, DecodeError> {
+        let header = if let Some(header) = encoded.get(..DTM_HEADER_SIZE) {
             header
         } else {
             return Err(DecodeError::InsufficientInputData);
@@ -74,9 +68,9 @@ impl DTM {
             return Err(DecodeError::InvalidMagic);
         }
 
-        let pixel_size = header[3] as usize;
-        let width = u32::from_be_bytes(header[4..8].try_into().unwrap()) as usize;
-        let height = u32::from_be_bytes(header[8..12].try_into().unwrap()) as usize;
+        let pixel_size = header[3] as u32;
+        let width = u32::from_be_bytes(header[4..8].try_into().unwrap());
+        let height = u32::from_be_bytes(header[8..12].try_into().unwrap());
 
         let mut channel_count = 0;
         let mut channel_sizes = [0; 4];
@@ -95,89 +89,130 @@ impl DTM {
             channel_count += 1;
         }
 
-        let descriptor = DTM {
-            pixel_size,
-            channel_count,
-            width,
-            height,
+        Ok(Header {
+            descriptor: DTM {
+                pixel_size,
+                channel_count,
+                width,
+                height,
+            },
+            channel_sizes,
+            total_size,
+        })
+    }
+
+    /// Decodes a DTM image from a file into a newly allocated `Vec`.
+    #[inline]
+    pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<(Self, Vec<u8>), DecodeError> {
+        let encoded = match fs::read(path) {
+            Ok(encoded) => encoded,
+            Err(_) => return Err(DecodeError::IoError),
         };
 
-        let mut bytes = match bytes.get(DTM_HEADER_SIZE..total_size) {
-            Some(bytes) => Bytes::new(bytes),
+        DTM::decode_alloc(&encoded)
+    }
+
+    /// Decodes a DTM image from a byte slice into the `decoded` slice.
+    #[inline]
+    pub fn decode(encoded: &[u8], decoded: &mut [u8]) -> Result<Self, DecodeError> {
+        let Header {
+            descriptor,
+            channel_sizes,
+            total_size,
+        } = Self::decode_header(encoded)?;
+
+        let mut encoded = match encoded.get(DTM_HEADER_SIZE..total_size) {
+            Some(encoded) => Encoded::new(encoded),
             None => return Err(DecodeError::InsufficientInputData),
         };
 
-        let mut data = vec![0; descriptor.image_pixel_count()];
-        let mut pixels = Pixels::new(width, height, channel_count, &mut data);
+        let mut decoded = Decoded::new(
+            descriptor.width as usize,
+            descriptor.height as usize,
+            descriptor.channel_count as usize,
+            decoded,
+        );
 
-        for &channel_size in &channel_sizes[0..channel_count] {
-            bytes.next_channel(channel_size);
+        for &channel_size in &channel_sizes[0..descriptor.channel_count as usize] {
+            encoded.next_channel(channel_size);
 
             if channel_size < descriptor.channel_size() {
-                decode(&mut bytes, &mut pixels)?;
+                decode(&mut encoded, &mut decoded)?;
             } else if channel_size == descriptor.channel_size() {
-                &bytes.data[..channel_size]
+                encoded.data[..channel_size]
                     .chunks_exact(2)
-                    .for_each(|bytes| pixels.set(bytes[0] as u16 + ((bytes[1] as u16) << 8)));
+                    .for_each(|encoded| {
+                        decoded.set(encoded[0] as u16 + ((encoded[1] as u16) << 8))
+                    });
             } else {
                 return Err(DecodeError::InvalidChannels);
             }
 
-            pixels.next_channel();
+            decoded.next_channel();
         }
 
-        Ok((descriptor, data))
+        Ok(descriptor)
+    }
+
+    /// Decodes a DTM image from a byte slice into a newly allocated `Vec`.
+    #[inline]
+    pub fn decode_alloc(encoded: &[u8]) -> Result<(Self, Vec<u8>), DecodeError> {
+        let header = Self::decode_header(encoded)?;
+        let mut decoded = vec![0; header.descriptor.image_size()];
+        let descriptor = Self::decode(encoded, &mut decoded)?;
+
+        Ok((descriptor, decoded))
     }
 }
 
-fn decode(bytes: &mut Bytes, pixels: &mut Pixels) -> Result<(), DecodeError> {
-    while !bytes.is_empty() {
-        let byte = bytes.next();
+fn decode(encoded: &mut Encoded, decoded: &mut Decoded) -> Result<(), DecodeError> {
+    while !encoded.is_empty() {
+        let byte = encoded.next();
 
         match byte {
             CACHE..=CACHE_END => {
                 let index = MASK_6BIT & byte;
-                pixels.set(pixels.cache[index as usize]);
+                decoded.set(decoded.cache[index as usize]);
             }
             SINGLE_DIFF..=SINGLE_DIFF_END => {
                 let diff = (MASK_6BIT & byte) as i32 - SINGLE_DIFF_RANGE;
-                let pixel = (pixels.paeth() as i32 + diff) as u16;
-                pixels.set(pixel);
+                let pixel = (decoded.paeth() as i32 + diff) as u16;
+                decoded.set(pixel);
             }
             DOUBLE_DIFF..=DOUBLE_DIFF_END => {
                 let diff = (MASK_3BIT & (byte >> 3)) as i32 - DOUBLE_DIFF_RANGE;
-                let pixel = (pixels.paeth() as i32 + diff) as u16;
-                pixels.set(pixel);
+                let pixel = (decoded.paeth() as i32 + diff) as u16;
+                decoded.set(pixel);
 
                 let diff = (MASK_3BIT & byte) as i32 - DOUBLE_DIFF_RANGE;
-                let pixel = (pixels.paeth() as i32 + diff) as u16;
-                pixels.set(pixel);
+                let pixel = (decoded.paeth() as i32 + diff) as u16;
+                decoded.set(pixel);
             }
             RUN_LENGTH..=RUN_LENGTH_END => {
                 let run_length = (MASK_6BIT & byte + 1) as usize;
-                let pixel = pixels.previous();
-                (0..run_length).for_each(|_| pixels.set(pixel));
+                let pixel = decoded.previous();
+                (0..run_length).for_each(|_| decoded.set(pixel));
             }
             DEFAULT => {
-                pixels.set(bytes.next() as u16 + ((bytes.next() as u16) << 8));
+                decoded.set(encoded.next() as u16 + ((encoded.next() as u16) << 8));
             }
         }
     }
 
-    if pixels.is_empty() {
+    if decoded.is_empty() {
         Ok(())
     } else {
         Err(DecodeError::InsufficientInputData)
     }
 }
 
-struct Bytes<'a> {
+struct Encoded<'a> {
     data: &'a [u8],
     index: usize,
     channel_size: usize,
 }
 
-impl<'a> Bytes<'a> {
+impl<'a> Encoded<'a> {
     #[inline]
     fn new(data: &'a [u8]) -> Self {
         Self {
@@ -207,19 +242,19 @@ impl<'a> Bytes<'a> {
     }
 }
 
-struct Pixels<'a> {
+struct Decoded<'a> {
     width: usize,
     height: usize,
     channel_count: usize,
-    data: &'a mut [u16],
+    data: &'a mut [u8],
     cache: [u16; 64],
     channel: usize,
     index: usize,
 }
 
-impl<'a> Pixels<'a> {
+impl<'a> Decoded<'a> {
     #[inline]
-    pub fn new(width: usize, height: usize, channel_count: usize, data: &'a mut [u16]) -> Self {
+    pub fn new(width: usize, height: usize, channel_count: usize, data: &'a mut [u8]) -> Self {
         Self {
             width,
             height,
@@ -233,7 +268,8 @@ impl<'a> Pixels<'a> {
 
     #[inline]
     fn get(&self, index: usize) -> u16 {
-        self.data[index * self.channel_count + self.channel]
+        let index = (index * self.channel_count + self.channel) << 1;
+        u16::from_le_bytes(self.data[index..index + 2].try_into().unwrap())
     }
 
     #[inline]
@@ -272,7 +308,8 @@ impl<'a> Pixels<'a> {
 
     #[inline]
     fn set(&mut self, pixel: u16) {
-        self.data[self.index * self.channel_count + self.channel] = pixel;
+        let index = (self.index * self.channel_count + self.channel) << 1;
+        self.data[index..index + 2].copy_from_slice(&pixel.to_le_bytes());
         self.cache[pixel as usize % 64] = pixel;
         self.index += 1;
     }
