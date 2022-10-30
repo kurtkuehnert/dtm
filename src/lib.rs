@@ -1,7 +1,3 @@
-// pub use encode;
-
-pub use decode::DecodeError;
-
 pub mod decode;
 pub mod encode;
 
